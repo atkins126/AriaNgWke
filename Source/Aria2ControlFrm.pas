@@ -15,7 +15,8 @@ unit Aria2ControlFrm;
 interface
 
 uses
-  System.SysUtils, System.Classes, Vcl.Forms, Langji.Wke.Types, Langji.Wke.Webbrowser, Win11Forms;
+  System.SysUtils, System.Classes, Vcl.Forms, Winapi.Messages, Langji.Wke.Types, Langji.Wke.Webbrowser,
+  Win11Forms;
 
 type
   TAria2ControlForm = class(TForm)
@@ -27,13 +28,17 @@ type
   private
     function  CheckAriaNgFileBuild(const AFileName: string): Boolean;
     function  CompareVersion(const AVer1, AVer2: string): Integer;
+    function  DarkModeIsEnabled: Boolean;
     function  LoadAriaNgBuildFromStream(AStream: TStream): string;
     procedure ExtractAriaNgFile(const AFile: string);
     procedure ParseOptionEvent(const AEvent: string);
+    procedure SetTitleThemeMode(const ATheme: string);
   private
     procedure WebBrowserAlertBox(Sender: TObject; sMsg: string);
     procedure WebBrowserLoadEnd(Sender: TObject; sUrl: string; loadresult: wkeLoadingResult);
     procedure WebBrowserTitleChange(Sender: TObject; sTitle: string);
+  protected
+    procedure WMSettingChange(var Message: TMessage); message WM_SETTINGCHANGE;
   end;
 
 var
@@ -45,10 +50,12 @@ implementation
 {$R *.res} { index.html }
 
 uses
-  System.StrUtils, Winapi.Windows, Vcl.Controls, JsonDataObjects, Langji.Wke.Lib;
+  System.StrUtils, System.Win.Registry, Winapi.Windows, Vcl.Controls, Langji.Wke.Lib, JsonDataObjects;
 
 const
   defAriaNgDarkMode     = 'dark';
+  defAriaNgLightMode    = 'light';
+  defAriaNgSystemMode   = 'system';
 
   defLocalFilePathFmt   = '%s\%s';
 
@@ -124,6 +131,29 @@ begin
       Exit;
   end;
   Result := 0;
+end;
+
+function TAria2ControlForm.DarkModeIsEnabled: Boolean;
+const
+  defLightThemeValueName = 'AppsUseLightTheme';
+  defPersonalizeKeyName  = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\';
+var
+  Reg: TRegistry;
+begin
+  Result := False;
+  Reg := TRegistry.Create(KEY_READ);
+  with Reg do
+  try
+    RootKey := HKEY_CURRENT_USER;
+    if OpenKey(defPersonalizeKeyName, False) then
+    begin
+      if ValueExists(defLightThemeValueName) then
+        Result := ReadInteger(defLightThemeValueName) = 0;
+      CloseKey;
+    end;
+  finally
+    Free;
+  end;
 end;
 
 procedure TAria2ControlForm.ExtractAriaNgFile(const AFile: string);
@@ -253,8 +283,22 @@ begin
   if S <> FLastTheme then
   begin
     FLastTheme := S;
-    Self.TitleDarkMode := S = defAriaNgDarkMode;
+    SetTitleThemeMode(FLastTheme);
   end;
+end;
+
+procedure TAria2ControlForm.SetTitleThemeMode(const ATheme: string);
+var
+  S: string;
+begin
+  S := ATheme;
+  if S = defAriaNgSystemMode then
+  begin
+    if DarkModeIsEnabled then
+      S := defAriaNgDarkMode
+    else S := defAriaNgLightMode;
+  end;
+  Self.TitleDarkMode := S = defAriaNgDarkMode;
 end;
 
 procedure TAria2ControlForm.WebBrowserAlertBox(Sender: TObject; sMsg: string);
@@ -298,6 +342,15 @@ begin
   OutputDebugString(PChar('WebBrowserTitleChange: ' + sTitle));
 {$ENDIF}
   Caption := sTitle;
+end;
+
+procedure TAria2ControlForm.WMSettingChange(var Message: TMessage);
+begin
+{$IFDEF DEBUGMESSAGE}
+  OutputDebugString('WMSettingChange');
+{$ENDIF}
+  inherited;
+  SetTitleThemeMode(FLastTheme);
 end;
 
 end.
