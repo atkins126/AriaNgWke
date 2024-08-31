@@ -6,7 +6,7 @@
 {   备注：                                                                }
 {   审核：                                                                }
 {                                                                         }
-{   Copyright (c) 1998-2022 Super Studio                                  }
+{   Copyright (c) 1998-2023 Super Studio                                  }
 {                                                                         }
 { *********************************************************************** }
 
@@ -15,30 +15,30 @@ unit Aria2ControlFrm;
 interface
 
 uses
-  System.SysUtils, Winapi.Messages, Vcl.Forms, Langji.Wke.Webbrowser, Win11Forms,
-  Aria2LocalStorage;
-
-const
-  UM_FILE_MONITOR       = WM_USER + 100;
+  System.SysUtils, System.Classes, Vcl.Forms, Winapi.Messages, Langji.Wke.Types, Langji.Wke.Webbrowser,
+  Win11Forms;
 
 type
   TAria2ControlForm = class(TForm)
     procedure FormCreate(Sender: TObject);
-    procedure FormDestroy(Sender: TObject);
     procedure FormShow(Sender: TObject);
   private
-    FLocalStorage: TAria2LocalStorage;
-    FWebBrowser: TWkeWebBrowser;
     FLastTheme: string;
+    FWebBrowser: TWkeWebBrowser;
   private
+    function  CheckAriaNgFileBuild(const AFileName: string): Boolean;
     function  CompareVersion(const AVer1, AVer2: string): Integer;
-    function  CheckAriaNgFileBuild(const AFile: string): Boolean;
+    function  DarkModeIsEnabled: Boolean;
+    function  LoadAriaNgBuildFromStream(AStream: TStream): string;
     procedure ExtractAriaNgFile(const AFile: string);
-    procedure ReloadLocalStorage;
+    procedure ParseOptionEvent(const AEvent: string);
+    procedure SetTitleThemeMode(const ATheme: string);
   private
-    procedure WkeWebBrowser1TitleChange(Sender: TObject; sTitle: string);
+    procedure WebBrowserAlertBox(Sender: TObject; sMsg: string);
+    procedure WebBrowserLoadEnd(Sender: TObject; sUrl: string; loadresult: wkeLoadingResult);
+    procedure WebBrowserTitleChange(Sender: TObject; sTitle: string);
   protected
-    procedure UMFileMonitor(var Message: TMessage); message UM_FILE_MONITOR;
+    procedure WMSettingChange(var Message: TMessage); message WM_SETTINGCHANGE;
   end;
 
 var
@@ -50,41 +50,42 @@ implementation
 {$R *.res} { index.html }
 
 uses
-  System.Classes, System.StrUtils, System.Types, Vcl.Controls, Langji.Wke.Lib,
-  Aria2FileMonitor;
+  System.StrUtils, System.Win.Registry, Winapi.Windows, Vcl.Controls, Langji.Wke.Lib, JsonDataObjects;
 
 const
-  defAriaNgFileOpenTag  = 'buildVersion:"v';
-  defAriaNgFileCloseTag = '"';
-  defAriaNgFileBuild    = '1.2.5';
-
   defAriaNgDarkMode     = 'dark';
+  defAriaNgLightMode    = 'light';
+  defAriaNgSystemMode   = 'system';
 
   defLocalFilePathFmt   = '%s\%s';
 
+  defWkeAria2FileName   = 'App\index.html';
   defWkeEngineFileName  = 'WKE.dll';
-
   defWkeStoragePathName = 'LocalStorage';
-  defWkeStorageFileName = 'file.localstorage';
 
 { TAria2ControlForm }
 
-function TAria2ControlForm.CheckAriaNgFileBuild(const AFile: string): Boolean;
+function TAria2ControlForm.CheckAriaNgFileBuild(const AFileName: string): Boolean;
 var
-  P1, P2: Integer;
-  S: string;
+  FS, RS: TStream;
+  FV, RV: string;
 begin
   Result := False;
-  S := TAria2LocalStorage.LoadDataFromFile(AFile, TEncoding.UTF8, 512 * 1024);
-  P1 := Pos(defAriaNgFileOpenTag, S);
-  if P1 = 0 then
+  if not FileExists(AFileName) then
     Exit;
-  Inc(P1, Length(defAriaNgFileOpenTag));
-  P2 := PosEx(defAriaNgFileCloseTag, S, P1);
-  if P2 = 0 then
-    Exit;
-  S := Copy(S, P1, P2 - P1);
-  Result := CompareVersion(S, defAriaNgFileBuild) >= 0;
+  FS := TFileStream.Create(AFileName, fmOpenRead or fmShareDenyWrite);
+  try
+    RS := TResourceStream.Create(HInstance, 'INDEX', RT_RCDATA);
+    try
+      FV := LoadAriaNgBuildFromStream(FS);
+      RV := LoadAriaNgBuildFromStream(RS);
+      Result := CompareVersion(FV, RV) >= 0;
+    finally
+      RS.Free;
+    end;
+  finally
+    FS.Free;
+  end;
 end;
 
 function TAria2ControlForm.CompareVersion(const AVer1, AVer2: string): Integer;
@@ -132,6 +133,29 @@ begin
   Result := 0;
 end;
 
+function TAria2ControlForm.DarkModeIsEnabled: Boolean;
+const
+  defLightThemeValueName = 'AppsUseLightTheme';
+  defPersonalizeKeyName  = 'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\';
+var
+  Reg: TRegistry;
+begin
+  Result := False;
+  Reg := TRegistry.Create(KEY_READ);
+  with Reg do
+  try
+    RootKey := HKEY_CURRENT_USER;
+    if OpenKey(defPersonalizeKeyName, False) then
+    begin
+      if ValueExists(defLightThemeValueName) then
+        Result := ReadInteger(defLightThemeValueName) = 0;
+      CloseKey;
+    end;
+  finally
+    Free;
+  end;
+end;
+
 procedure TAria2ControlForm.ExtractAriaNgFile(const AFile: string);
 var
   F: string;
@@ -154,40 +178,28 @@ end;
 
 procedure TAria2ControlForm.FormCreate(Sender: TObject);
 var
-  S: string;
+  F: string;
 begin
-  S := GetModuleName(0);
-  S := ExtractFileDir(S);
-
-  wkeLibFileName := Format(defLocalFilePathFmt, [S, defWkeEngineFileName]);
+  F := GetModuleName(0);
+  F := ExtractFileDir(F);
+  wkeLibFileName := Format(defLocalFilePathFmt, [F, defWkeEngineFileName]);
 
   FWebBrowser := TWkeWebBrowser.Create(Self);
   FWebBrowser.Parent := Self;
   FWebBrowser.Align := alClient;
 
-  S := Format(defLocalFilePathFmt, [S, defWkeStoragePathName]);
-  if not DirectoryExists(S) then
-    ForceDirectories(S);
-  FWebBrowser.CookiePath := S;
+  F := Format(defLocalFilePathFmt, [F, defWkeStoragePathName]);
+  if not DirectoryExists(F) then
+    ForceDirectories(F);
+  FWebBrowser.CookiePath := F;
   FWebBrowser.CookieEnabled := True;
-  FWebBrowser.LocalStoragePath := S;
+  FWebBrowser.LocalStoragePath := F;
 
-  FWebBrowser.OnTitleChange := WkeWebBrowser1TitleChange;
+  FWebBrowser.OnAlertBox := WebBrowserAlertBox;
+  FWebBrowser.OnLoadEnd := WebBrowserLoadEnd;
+  FWebBrowser.OnTitleChange := WebBrowserTitleChange;
 
   Self.RoundedCorners := rcOff;
-
-  S := Format(defLocalFilePathFmt, [S, defWkeStorageFileName]);
-  FLocalStorage := TAria2LocalStorage.Create(S);
-
-  FLastTheme := '';
-  ReloadLocalStorage;
-
-  InstallFileMonitor(defWkeStorageFileName, Self.Handle, UM_FILE_MONITOR);
-end;
-
-procedure TAria2ControlForm.FormDestroy(Sender: TObject);
-begin
-  FreeAndNil(FLocalStorage);
 end;
 
 procedure TAria2ControlForm.FormShow(Sender: TObject);
@@ -196,40 +208,149 @@ var
 begin
   F := GetModuleName(0);
   F := ExtractFilePath(F);
-  F := F + 'App\index.html';
+  F := F + defWkeAria2FileName;
   if not FileExists(F) or not CheckAriaNgFileBuild(F) then
     ExtractAriaNgFile(F);
   if FileExists(F) then
     FWebBrowser.LoadFile(F);
   FWebBrowser.ZoomFactor := Screen.PixelsPerInch / 96;
-  EnableFileMonitor(True);
 end;
 
-procedure TAria2ControlForm.ReloadLocalStorage;
+function TAria2ControlForm.LoadAriaNgBuildFromStream(AStream: TStream): string;
+
+  function ExtractAriaNgBuild(const AData: string): string;
+  const
+    defAriaNgFileOpenTag  = 'buildVersion:"v';
+    defAriaNgFileCloseTag = '"';
+  var
+    P1, P2: Integer;
+  begin
+    P1 := Pos(defAriaNgFileOpenTag, AData);
+    if P1 = 0 then
+      Exit;
+    Inc(P1, Length(defAriaNgFileOpenTag));
+    P2 := PosEx(defAriaNgFileCloseTag, AData, P1);
+    if P2 = 0 then
+      Exit;
+    Result := Copy(AData, P1, P2 - P1);
+  end;
+
+  function ExtractAriaNgPartData(AStream: TStream): string;
+  var
+    SR: TTextReader;
+  begin
+    Result := '';
+    SR := TStreamReader.Create(AStream, TEncoding.UTF8, False, 512 * 1024);
+    with SR do
+    try
+      Result := ReadToEnd;
+    finally
+      Free;
+    end;
+  end;
 var
   S: string;
 begin
-  S := FLocalStorage.GetOptions('theme');
+  Assert(AStream <> nil);
+  S := ExtractAriaNgPartData(AStream);
+  Result := ExtractAriaNgBuild(S);
+end;
+
+procedure TAria2ControlForm.ParseOptionEvent(const AEvent: string);
+var
+  R: TJsonBaseObject;
+  S: string;
+begin
+  R := TJsonObject.Parse(AEvent);
+  try
+    if not (R is TJsonObject) then
+      Exit;
+    S := TJsonObject(R).S['key'];
+    if S <> 'AriaNg.Options' then
+      Exit;
+    S := TJsonObject(R).S['value'];
+  finally
+    R.Free;
+  end;
+  R := TJsonObject.Parse(S);
+  try
+    if not (R is TJsonObject) then
+      Exit;
+    S := TJsonObject(R).S['theme'];
+  finally
+    R.Free;
+  end;
   if S <> FLastTheme then
   begin
     FLastTheme := S;
-    Self.TitleDarkMode := S = defAriaNgDarkMode;
+    SetTitleThemeMode(FLastTheme);
   end;
 end;
 
-procedure TAria2ControlForm.UMFileMonitor(var Message: TMessage);
+procedure TAria2ControlForm.SetTitleThemeMode(const ATheme: string);
+var
+  S: string;
 begin
-  EnableFileMonitor(False);
-  try
-    ReloadLocalStorage;
-  finally
-    EnableFileMonitor(True);
+  S := ATheme;
+  if S = defAriaNgSystemMode then
+  begin
+    if DarkModeIsEnabled then
+      S := defAriaNgDarkMode
+    else S := defAriaNgLightMode;
   end;
+  Self.TitleDarkMode := S = defAriaNgDarkMode;
 end;
 
-procedure TAria2ControlForm.WkeWebBrowser1TitleChange(Sender: TObject; sTitle: string);
+procedure TAria2ControlForm.WebBrowserAlertBox(Sender: TObject; sMsg: string);
 begin
+{$IFDEF DEBUGMESSAGE}
+  OutputDebugString(PChar('WebBrowserAlertBox: ' + AMessage));
+{$ENDIF}
+  ParseOptionEvent(sMsg);
+end;
+
+procedure TAria2ControlForm.WebBrowserLoadEnd(Sender: TObject; sUrl: string; loadresult: wkeLoadingResult);
+var
+  S: string;
+begin
+{$IFDEF DEBUGMESSAGE}
+  OutputDebugString(PChar('WebBrowserLoadEnd: ' + IntToStr(Ord(loadresult))));
+{$ENDIF}
+  if loadresult <> WKE_LOADING_SUCCEEDED then
+    Exit;
+
+  S := 'var ge = new Event("setItemEvent");' +
+    'ge.key = "AriaNg.Options";' +
+    'ge.value = localStorage.getItem("AriaNg.Options");' +
+    'alert(JSON.stringify(ge));';
+  FWebBrowser.ExecuteJavascript(S);
+
+  S := 'var orignalSetItem = localStorage.setItem;' +
+    'localStorage.setItem = function(key,newValue) {' +
+    'var se = new Event("setItemEvent");' +
+    'se.key = key;' +
+    'se.value = newValue;' +
+    'alert(JSON.stringify(se));' +
+    'orignalSetItem.apply(this,arguments);' +
+  '};';
+  FWebBrowser.ExecuteJavascript(S);
+end;
+
+procedure TAria2ControlForm.WebBrowserTitleChange(Sender: TObject; sTitle: string);
+begin
+{$IFDEF DEBUGMESSAGE}
+  OutputDebugString(PChar('WebBrowserTitleChange: ' + sTitle));
+{$ENDIF}
   Caption := sTitle;
+end;
+
+procedure TAria2ControlForm.WMSettingChange(var Message: TMessage);
+begin
+{$IFDEF DEBUGMESSAGE}
+  OutputDebugString('WMSettingChange');
+{$ENDIF}
+  inherited;
+  SetTitleThemeMode(FLastTheme);
 end;
 
 end.
